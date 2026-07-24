@@ -69,28 +69,51 @@ jobs:
       - name: Apply patch (disable ACP client FS)
         run: |
           set -euo pipefail
-          PATCH="$GITHUB_WORKSPACE/patches/0001-disable-acp-fs-client.patch"
-          test -f "$PATCH"
-          cd src
-          # 业务目的：在无 .git 的上游解压树里打补丁；优先 git apply，失败再用 patch -p1（不用 --forward 以免误 skip）
-          applied=0
-          if command -v git >/dev/null 2>&1; then
-            if git apply --verbose "$PATCH"; then
-              applied=1
-            else
-              echo "git apply failed, trying patch -p1" >&2
-            fi
-          fi
-          if [ "$applied" -eq 0 ]; then
-            patch -p1 --batch < "$PATCH"
-          fi
-          CONN=src-tauri/src/acp/connection.rs
-          grep -q '不声明 client FS' "$CONN"
-          if grep -n 'client_capabilities' -A6 "$CONN" | grep -q 'read_text_file(true)'; then
-            echo "ERROR: still declares read_text_file(true)" >&2
-            exit 1
-          fi
-          echo "Patch OK"
+          # Prefer in-place rewrite: git apply/patch are unreliable on CI extract trees.
+          python3 - <<'PY'
+          from pathlib import Path
+          conn = Path("src/src-tauri/src/acp/connection.rs")
+          text = conn.read_text(encoding="utf-8")
+          old_import = (
+              "    CreateTerminalRequest, CreateTerminalResponse, EmbeddedResource, EmbeddedResourceResource,\n"
+              "    FileSystemCapabilities, ImageContent, InitializeRequest, KillTerminalRequest,"
+          )
+          new_import = (
+              "    CreateTerminalRequest, CreateTerminalResponse, EmbeddedResource, EmbeddedResourceResource,\n"
+              "    ImageContent, InitializeRequest, KillTerminalRequest,"
+          )
+          if old_import not in text:
+              raise SystemExit("import block not found; upstream connection.rs changed")
+          text = text.replace(old_import, new_import, 1)
+          old_cap = (
+              "            // Advertise filesystem + terminal capabilities for ACP tool execution.\n"
+              "            let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_capabilities(\n"
+              "                ClientCapabilities::new()\n"
+              "                    .terminal(true)\n"
+              "                    .fs(FileSystemCapabilities::new()\n"
+              "                        .read_text_file(true)\n"
+              "                        .write_text_file(true)),\n"
+              "            );"
+          )
+          new_cap = (
+              "            // disable client FS: Grok local read_file supports ImageContent\n"
+              "            // (Codeg no longer proxies fs/read_text_file workspace sandbox)\n"
+              "            // still advertise terminal for ACP terminal runtime\n"
+              "            let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_capabilities(\n"
+              "                ClientCapabilities::new().terminal(true),\n"
+              "            );"
+          )
+          if old_cap not in text:
+              raise SystemExit("capabilities block not found; upstream connection.rs changed")
+          text = text.replace(old_cap, new_cap, 1)
+          conn.write_text(text, encoding="utf-8")
+          after = text.split("client_capabilities", 1)[1][:500]
+          if "read_text_file(true)" in after:
+              raise SystemExit("still declares read_text_file(true)")
+          if "disable client FS" not in text:
+              raise SystemExit("marker missing after patch")
+          print("Patch OK (python rewrite)")
+          PY
 
       - name: Build codeg-server + codeg-mcp
         working-directory: src/src-tauri
