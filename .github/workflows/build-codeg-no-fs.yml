@@ -1,0 +1,133 @@
+# 业务目的：在有写权限的自有仓库里按需编译「不声明 ACP client FS」的 codeg-server/mcp，
+# 避免本机长时间 cargo build；产物仅含两个二进制，供下载覆盖安装。
+name: build-codeg-no-fs
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "上游 xintaofei/codeg 的 release tag（如 v0.21.6）；留空则用 latest"
+        required: false
+        default: ""
+      rust_toolchain:
+        description: "Rust toolchain（stable 即可）"
+        required: false
+        default: "stable"
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux-x64:
+    name: linux-x64 (codeg-server + codeg-mcp)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream version
+        id: ver
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.version }}" ]; then
+            VER="${{ inputs.version }}"
+          else
+            VER=$(curl -fsSL https://api.github.com/repos/xintaofei/codeg/releases/latest \
+              | python3 -c 'import sys,json; print(json.load(sys.stdin)["tag_name"])')
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Using upstream tag: $VER"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust_toolchain }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/src-tauri -> target
+          shared-key: codeg-${{ steps.ver.outputs.version }}-nofeatures
+
+      - name: Download upstream source
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+          mkdir -p src
+          URL="https://github.com/xintaofei/codeg/archive/refs/tags/${VER}.tar.gz"
+          echo "Fetching $URL"
+          if ! curl -fSL --retry 3 -o src.tgz "$URL"; then
+            URL="https://github.com/xintaofei/codeg/archive/refs/heads/${VER#v}.tar.gz"
+            echo "Fallback $URL"
+            curl -fSL --retry 3 -o src.tgz "$URL"
+          fi
+          tar xzf src.tgz -C src --strip-components=1
+          test -f src/src-tauri/Cargo.toml
+
+      - name: Apply patch (disable ACP client FS)
+        run: |
+          set -euo pipefail
+          PATCH="$GITHUB_WORKSPACE/patches/0001-disable-acp-fs-client.patch"
+          test -f "$PATCH"
+          cd src
+          if command -v git >/dev/null; then
+            git apply --verbose "$PATCH" || patch -p1 --forward --batch < "$PATCH"
+          else
+            patch -p1 --forward --batch < "$PATCH"
+          fi
+          CONN=src-tauri/src/acp/connection.rs
+          grep -q '不声明 client FS' "$CONN"
+          if grep -n 'client_capabilities' -A6 "$CONN" | grep -q 'read_text_file(true)'; then
+            echo "ERROR: still declares read_text_file(true)" >&2
+            exit 1
+          fi
+          echo "Patch OK"
+
+      - name: Build codeg-server + codeg-mcp
+        working-directory: src/src-tauri
+        run: |
+          set -euo pipefail
+          cargo build --release --no-default-features \
+            --bin codeg-server --bin codeg-mcp
+          test -x target/release/codeg-server
+          target/release/codeg-server --version || true
+          test -x target/release/codeg-mcp
+
+      - name: Stage artifacts
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+          OUT="dist/codeg-server-linux-x64-no-fs-${VER}"
+          mkdir -p "$OUT"
+          cp -f src/src-tauri/target/release/codeg-server "$OUT/"
+          cp -f src/src-tauri/target/release/codeg-mcp "$OUT/"
+          chmod 755 "$OUT/codeg-server" "$OUT/codeg-mcp"
+          {
+            echo "upstream=${VER}"
+            echo "patch=patches/0001-disable-acp-fs-client.patch"
+            echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            "./$OUT/codeg-server" --version 2>&1 || true
+          } > "$OUT/BUILD_INFO.txt"
+          ls -la "$OUT"
+          (cd dist && zip -r "codeg-server-linux-x64-no-fs-${VER}.zip" "codeg-server-linux-x64-no-fs-${VER}")
+
+      - name: Upload artifact (binaries)
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeg-server-linux-x64-no-fs-${{ steps.ver.outputs.version }}
+          path: |
+            dist/codeg-server-linux-x64-no-fs-${{ steps.ver.outputs.version }}/codeg-server
+            dist/codeg-server-linux-x64-no-fs-${{ steps.ver.outputs.version }}/codeg-mcp
+            dist/codeg-server-linux-x64-no-fs-${{ steps.ver.outputs.version }}/BUILD_INFO.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeg-server-linux-x64-no-fs-${{ steps.ver.outputs.version }}-zip
+          path: dist/codeg-server-linux-x64-no-fs-${{ steps.ver.outputs.version }}.zip
+          if-no-files-found: error
+          retention-days: 30

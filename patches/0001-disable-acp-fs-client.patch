@@ -1,0 +1,31 @@
+diff --git a/src-tauri/src/acp/connection.rs b/src-tauri/src/acp/connection.rs
+index 35517ec..9349aa0 100644
+--- a/src-tauri/src/acp/connection.rs
++++ b/src-tauri/src/acp/connection.rs
+@@ -5,7 +5,7 @@ use std::sync::Arc;
+ use sacp::schema::{
+     BlobResourceContents, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
+     CreateTerminalRequest, CreateTerminalResponse, EmbeddedResource, EmbeddedResourceResource,
+-    FileSystemCapabilities, ImageContent, InitializeRequest, KillTerminalRequest,
++    ImageContent, InitializeRequest, KillTerminalRequest,
+     KillTerminalResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
+     PermissionOptionKind, Plan, PlanEntryPriority, PlanEntryStatus, PromptRequest, ProtocolVersion,
+     ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+@@ -2370,13 +2370,11 @@ async fn run_connection(
+             let state = state_outer;
+             let agent_name_for_log = registry::get_agent_meta(agent_type).name;
+ 
+-            // Advertise filesystem + terminal capabilities for ACP tool execution.
++            // 不声明 client FS：让 Grok 等 agent 在本机执行 read_file/search_replace，
++            // 从而支持图片 ImageContent；Codeg 侧不再做 workspace 文本沙箱代理。
++            // 仍声明 terminal，终端执行继续走 Codeg ACP terminal runtime。
+             let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_capabilities(
+-                ClientCapabilities::new()
+-                    .terminal(true)
+-                    .fs(FileSystemCapabilities::new()
+-                        .read_text_file(true)
+-                        .write_text_file(true)),
++                ClientCapabilities::new().terminal(true),
+             );
+             // Bound the Initialize handshake so an outdated / incompatible
+             // cached binary that never responds can't leave the frontend
