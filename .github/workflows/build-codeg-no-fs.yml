@@ -72,10 +72,17 @@ jobs:
           PATCH="$GITHUB_WORKSPACE/patches/0001-disable-acp-fs-client.patch"
           test -f "$PATCH"
           cd src
-          if command -v git >/dev/null; then
-            git apply --verbose "$PATCH" || patch -p1 --forward --batch < "$PATCH"
-          else
-            patch -p1 --forward --batch < "$PATCH"
+          # 业务目的：在无 .git 的上游解压树里打补丁；优先 git apply，失败再用 patch -p1（不用 --forward 以免误 skip）
+          applied=0
+          if command -v git >/dev/null 2>&1; then
+            if git apply --verbose "$PATCH"; then
+              applied=1
+            else
+              echo "git apply failed, trying patch -p1" >&2
+            fi
+          fi
+          if [ "$applied" -eq 0 ]; then
+            patch -p1 --batch < "$PATCH"
           fi
           CONN=src-tauri/src/acp/connection.rs
           grep -q '不声明 client FS' "$CONN"
