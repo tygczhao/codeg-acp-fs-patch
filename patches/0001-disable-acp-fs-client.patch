@@ -1,30 +1,29 @@
 diff --git a/src-tauri/src/acp/connection.rs b/src-tauri/src/acp/connection.rs
 --- a/src-tauri/src/acp/connection.rs
 +++ b/src-tauri/src/acp/connection.rs
-@@ -5,7 +5,7 @@
- use sacp::schema::{
+@@ -6,7 +6,7 @@
      BlobResourceContents, CancelNotification, ClientCapabilities, ContentBlock, ContentChunk,
-     CreateTerminalRequest, CreateTerminalResponse, EmbeddedResource, EmbeddedResourceResource,
+     CreateTerminalRequest, CreateTerminalResponse,
+     ElicitationCapabilities, ElicitationFormCapabilities, EmbeddedResource, EmbeddedResourceResource,
 -    FileSystemCapabilities, ImageContent, InitializeRequest, KillTerminalRequest,
 +    ImageContent, InitializeRequest, KillTerminalRequest,
      KillTerminalResponse, LoadSessionRequest, NewSessionRequest, NewSessionResponse,
      PermissionOptionKind, Plan, PlanEntryPriority, PlanEntryStatus, PromptRequest, ProtocolVersion,
      ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
-@@ -2519,13 +2519,11 @@
+@@ -2716,12 +2716,11 @@
              let state = state_outer;
              let agent_name_for_log = registry::get_agent_meta(agent_type).name;
  
 -            // Advertise filesystem + terminal capabilities for ACP tool execution.
-+            // 不声明 client FS：让 Grok 等 agent 在本机执行 read_file/search_replace，
-+            // 从而支持图片 ImageContent；Codeg 侧不再做 workspace 文本沙箱代理。
-+            // 仍声明 terminal，终端执行继续走 Codeg ACP terminal runtime。
-             let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_capabilities(
--                ClientCapabilities::new()
--                    .terminal(true)
--                    .fs(FileSystemCapabilities::new()
--                        .read_text_file(true)
--                        .write_text_file(true)),
-+                ClientCapabilities::new().terminal(true),
-             );
-             // Bound the Initialize handshake so an outdated / incompatible
-             // cached binary that never responds can't leave the frontend
++            // disable client FS: Grok local read_file supports ImageContent
++            // (Codeg no longer proxies fs/read_text_file workspace sandbox)
++            // still advertise terminal for ACP terminal runtime
+             let mut client_capabilities = ClientCapabilities::new()
+-                .terminal(true)
+-                .fs(FileSystemCapabilities::new()
+-                    .read_text_file(true)
+-                    .write_text_file(true));
++                .terminal(true);
+             // Codex only: advertise form elicitation so codex's native Plan-mode
+             // `request_user_input` tool is delivered as an `elicitation/create`
+             // request (handled below) instead of being silently answered `{}`.

@@ -69,51 +69,95 @@ jobs:
       - name: Apply patch (disable ACP client FS)
         run: |
           set -euo pipefail
-          # Prefer in-place rewrite: git apply/patch are unreliable on CI extract trees.
-          python3 - <<'PY'
+          # Write apply helper then run (compatible with 0.21.6 and 0.21.8+)
+          cat > /tmp/apply_disable_acp_fs.py <<'APPLY_PY'
           from pathlib import Path
-          conn = Path("src/src-tauri/src/acp/connection.rs")
-          text = conn.read_text(encoding="utf-8")
-          old_import = (
-              "    CreateTerminalRequest, CreateTerminalResponse, EmbeddedResource, EmbeddedResourceResource,\n"
-              "    FileSystemCapabilities, ImageContent, InitializeRequest, KillTerminalRequest,"
-          )
-          new_import = (
-              "    CreateTerminalRequest, CreateTerminalResponse, EmbeddedResource, EmbeddedResourceResource,\n"
-              "    ImageContent, InitializeRequest, KillTerminalRequest,"
-          )
-          if old_import not in text:
-              raise SystemExit("import block not found; upstream connection.rs changed")
-          text = text.replace(old_import, new_import, 1)
-          old_cap = (
-              "            // Advertise filesystem + terminal capabilities for ACP tool execution.\n"
-              "            let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_capabilities(\n"
-              "                ClientCapabilities::new()\n"
-              "                    .terminal(true)\n"
-              "                    .fs(FileSystemCapabilities::new()\n"
-              "                        .read_text_file(true)\n"
-              "                        .write_text_file(true)),\n"
-              "            );"
-          )
-          new_cap = (
-              "            // disable client FS: Grok local read_file supports ImageContent\n"
-              "            // (Codeg no longer proxies fs/read_text_file workspace sandbox)\n"
-              "            // still advertise terminal for ACP terminal runtime\n"
-              "            let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_capabilities(\n"
-              "                ClientCapabilities::new().terminal(true),\n"
-              "            );"
-          )
-          if old_cap not in text:
-              raise SystemExit("capabilities block not found; upstream connection.rs changed")
-          text = text.replace(old_cap, new_cap, 1)
-          conn.write_text(text, encoding="utf-8")
-          after = text.split("client_capabilities", 1)[1][:500]
-          if "read_text_file(true)" in after:
-              raise SystemExit("still declares read_text_file(true)")
-          if "disable client FS" not in text:
-              raise SystemExit("marker missing after patch")
-          print("Patch OK (python rewrite)")
-          PY
+          import sys
+
+          def apply(path: Path) -> None:
+              text = path.read_text(encoding="utf-8")
+              original = text
+
+              # 1) import: drop FileSystemCapabilities
+              text2 = text.replace(
+                  "    FileSystemCapabilities, ImageContent, InitializeRequest, KillTerminalRequest,",
+                  "    ImageContent, InitializeRequest, KillTerminalRequest,",
+                  1,
+              )
+              if text2 == text:
+                  # already without FS import is ok if body also already patched
+                  if "FileSystemCapabilities" not in text and "read_text_file(true)" not in text:
+                      print("already patched")
+                      return
+                  raise SystemExit("import FileSystemCapabilities line not found")
+              text = text2
+
+              # 2a) v0.21.8+: mut client_capabilities = ... .fs(...)
+              old_v218 = (
+                  "            // Advertise filesystem + terminal capabilities for ACP tool execution.\n"
+                  "            let mut client_capabilities = ClientCapabilities::new()\n"
+                  "                .terminal(true)\n"
+                  "                .fs(FileSystemCapabilities::new()\n"
+                  "                    .read_text_file(true)\n"
+                  "                    .write_text_file(true));"
+              )
+              new_v218 = (
+                  "            // disable client FS: Grok local read_file supports ImageContent\n"
+                  "            // (Codeg no longer proxies fs/read_text_file workspace sandbox)\n"
+                  "            // still advertise terminal for ACP terminal runtime\n"
+                  "            let mut client_capabilities = ClientCapabilities::new()\n"
+                  "                .terminal(true);"
+              )
+
+              # 2b) v0.21.6: InitializeRequest...client_capabilities(ClientCapabilities::new()...fs...)
+              old_v216 = (
+                  "            // Advertise filesystem + terminal capabilities for ACP tool execution.\n"
+                  "            let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_capabilities(\n"
+                  "                ClientCapabilities::new()\n"
+                  "                    .terminal(true)\n"
+                  "                    .fs(FileSystemCapabilities::new()\n"
+                  "                        .read_text_file(true)\n"
+                  "                        .write_text_file(true)),\n"
+                  "            );"
+              )
+              new_v216 = (
+                  "            // disable client FS: Grok local read_file supports ImageContent\n"
+                  "            // (Codeg no longer proxies fs/read_text_file workspace sandbox)\n"
+                  "            // still advertise terminal for ACP terminal runtime\n"
+                  "            let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_capabilities(\n"
+                  "                ClientCapabilities::new().terminal(true),\n"
+                  "            );"
+              )
+
+              if old_v218 in text:
+                  text = text.replace(old_v218, new_v218, 1)
+                  kind = "v0.21.8+"
+              elif old_v216 in text:
+                  text = text.replace(old_v216, new_v216, 1)
+                  kind = "v0.21.6"
+              else:
+                  raise SystemExit(
+                      "capabilities block not found; upstream connection.rs changed again"
+                  )
+
+              if "read_text_file(true)" in text:
+                  # still present only if other code mentions it in comments/handlers — allow handlers
+                  # but fail if still advertised under ClientCapabilities .fs(
+                  if ".fs(FileSystemCapabilities" in text or ".read_text_file(true)" in text.split("ClientCapabilities::new()")[1][:400] if "ClientCapabilities::new()" in text else False:
+                      # check capability construction region
+                      if "FileSystemCapabilities::new()" in text:
+                          raise SystemExit("still constructs FileSystemCapabilities")
+              if "FileSystemCapabilities::new()" in text:
+                  raise SystemExit("still constructs FileSystemCapabilities")
+
+              path.write_text(text, encoding="utf-8")
+              print(f"Patch OK ({kind}) -> {path}")
+
+          if __name__ == "__main__":
+              p = Path(sys.argv[1] if len(sys.argv) > 1 else "src-tauri/src/acp/connection.rs")
+              apply(p)
+          APPLY_PY
+          python3 /tmp/apply_disable_acp_fs.py src/src-tauri/src/acp/connection.rs
 
       - name: Build codeg-server + codeg-mcp
         working-directory: src/src-tauri
